@@ -1,0 +1,208 @@
+--- a/bsd/conf/files
++++ b/bsd/conf/files
+@@ -111,6 +111,7 @@
+ bsd/dev/sweet_rpmh.c			standard
+ bsd/dev/sweet_spmi.c			standard
+ bsd/dev/sweet_usb.c			standard
++bsd/dev/sweet_wlan.c			standard
+ bsd/dev/mem.c				standard
+ bsd/dev/munge.c 			optional config_requires_u32_munging
+ bsd/dev/unix_startup.c			standard
+--- a/bsd/dev/sweet_ufs.c
++++ b/bsd/dev/sweet_ufs.c
+@@ -53,6 +53,7 @@
+ extern void sweet_keys_init(void);
+ extern void sweet_touch_init(void);
+ extern void sweet_usb_probe(void);
++extern void sweet_wlan_probe(void);
+ 
+ #define REG_CAP         0x00
+ #define REG_IS          0x20
+@@ -660,6 +661,7 @@
+ 	sweet_keys_init();
+ 	sweet_touch_init();
+ 	sweet_usb_probe();
++	sweet_wlan_probe();
+ 	return 0;
+ }
+ 
+--- /dev/null
++++ b/bsd/dev/sweet_wlan.c
+@@ -0,0 +1,177 @@
++/*
++ * SWEET: Wi-Fi bring-up, step 0 - read-only SMEM probe.
++ *
++ * The phone's Wi-Fi (WCN3991, "qcom,icnss" at 0x18800000) is not a
++ * standalone device: Qualcomm's wlan firmware service lives in the modem
++ * subsystem (MPSS), reached through shared memory (SMEM), GLINK and a QMI
++ * service on the IPCRTR channel. Before anything can be started, we need to
++ * know what the earlier boot stages (SBL/ABL) left in SMEM and whether the
++ * modem has ever run. Addresses come from Xiaomi's published sweet-r-oss
++ * kernel (arch/arm64/boot/dts/qcom/sdmmagpie.dtsi, drivers/soc/qcom/smem.c);
++ * nothing here is measured on the phone yet.
++ *
++ * This probe is read-only. It maps the 2 MiB SMEM region (smem@86000000),
++ * checks the partition table ("$TOC") in its last 4 KiB, and lists every
++ * partition and the items allocated in it. Of particular interest:
++ *   - which host pairs exist (APPS=0, MODEM=1, ADSP=2, CDSP=5, ...);
++ *   - the items the modem uses to talk to us: smp2p 435 (modem->apps) and
++ *     428 (apps->modem), 421 (modem image info); the adsp (443/429) and
++ *     cdsp (94/432) smp2p items show which other subsystems SBL set up.
++ * Every read is bounds-checked against the mapped window.
++ */
++#if defined(ARM64_BOARD_CONFIG_SWEET)
++#include <sys/param.h>
++#include <sys/systm.h>
++#include <pexpert/pexpert.h>
++
++extern vm_offset_t ml_io_map(vm_offset_t, vm_size_t);
++void sweet_wlan_probe(void);
++
++#define SWEET_SMEM_PA           0x86000000u
++#define SWEET_SMEM_SIZE         0x00200000u
++#define SWEET_SMEM_PTABLE_OFF   (SWEET_SMEM_SIZE - 0x1000u)
++
++#define SMEM_HDR_VERSION_OFF    64u     /* 4 x struct smem_proc_comm (16 B) */
++#define SMEM_SBL_VERSION_INDEX  7u
++#define SMEM_HDR_INIT_OFF       (SMEM_HDR_VERSION_OFF + 32u * 4u)
++
++#define PTABLE_MAGIC            0x434f5424u     /* "$TOC" */
++#define PTABLE_HDR_SIZE         32u
++#define PTABLE_ENTRY_SIZE       32u
++#define PTABLE_MAX_ENTRIES      32u
++#define PART_MAGIC              0x54525024u     /* "$PRT" */
++#define PART_HDR_SIZE           32u
++#define PRIV_ENTRY_SIZE         16u
++#define PRIV_CANARY             0xa5a5u
++#define PART_MAX_ITEMS          64u
++
++static bool
++smem_in_range(uint32_t off, uint32_t len)
++{
++	return len <= SWEET_SMEM_SIZE && off <= SWEET_SMEM_SIZE - len;
++}
++
++static uint32_t
++smem_rd(vm_offset_t base, uint32_t off)
++{
++	uint32_t v = *(volatile uint32_t *)(base + off);
++	__asm__ volatile ("dmb oshld" ::: "memory");
++	return v;
++}
++
++static const char *
++smem_item_note(uint32_t item)
++{
++	switch (item) {
++	/* smp2p: first "qcom,smem" item of an edge is inbound, second outbound. */
++	case 435: return " (smp2p modem->apps, inbound)";
++	case 428: return " (smp2p apps->modem, outbound)";
++	case 443: return " (smp2p adsp->apps, inbound)";
++	case 429: return " (smp2p apps->adsp, outbound)";
++	case 94:  return " (smp2p cdsp->apps, inbound)";
++	case 432: return " (smp2p apps->cdsp, outbound)";
++	case 421: return " (modem image info)";
++	case 423: return " (adsp image info)";
++	case 601: return " (cdsp image info)";
++	default:  return "";
++	}
++}
++
++static void
++smem_dump_partition(vm_offset_t smem, uint32_t off, uint32_t size)
++{
++	uint32_t magic, host, used, count = 0, p;
++
++	if (size < PART_HDR_SIZE || (off & 3) || !smem_in_range(off, size)) {
++		printf("SWEET WLAN:   partition 0x%x+0x%x outside SMEM window, skipped\n", off, size);
++		return;
++	}
++	magic = smem_rd(smem, off);
++	host = smem_rd(smem, off + 4);
++	used = smem_rd(smem, off + 12);
++	printf("SWEET WLAN:   $PRT magic 0x%08x%s hosts %u<->%u size 0x%x free_uncached 0x%x free_cached 0x%x\n",
++	    magic, magic == PART_MAGIC ? "" : " (BAD)", host & 0xffff, host >> 16,
++	    smem_rd(smem, off + 8), used, smem_rd(smem, off + 16));
++	if (magic != PART_MAGIC || used > size) {
++		return;
++	}
++	/* Walk the uncached items from the first entry up to the free offset. */
++	for (p = PART_HDR_SIZE; p + PRIV_ENTRY_SIZE <= used && count < PART_MAX_ITEMS;) {
++		uint32_t w0 = smem_rd(smem, off + p);
++		uint32_t esize = smem_rd(smem, off + p + 4);
++		uint32_t w2 = smem_rd(smem, off + p + 8);
++		uint32_t item = w0 >> 16;
++		uint32_t pad_hdr = w2 >> 16;
++
++		if ((w0 & 0xffff) != PRIV_CANARY) {
++			printf("SWEET WLAN:     bad canary 0x%04x at +0x%x, stopping walk\n", w0 & 0xffff, p);
++			return;
++		}
++		printf("SWEET WLAN:     item %u size 0x%x%s\n", item, esize, smem_item_note(item));
++		count++;
++		/* next entry = this + header + padding_hdr + size (Linux uncached_entry_next) */
++		if (esize > size || pad_hdr > 0x1000) {
++			printf("SWEET WLAN:     implausible size/padding, stopping walk\n");
++			return;
++		}
++		p += PRIV_ENTRY_SIZE + pad_hdr + esize;
++	}
++	printf("SWEET WLAN:     %u item(s)%s\n", count, count >= PART_MAX_ITEMS ? " (list truncated)" : "");
++}
++
++void
++sweet_wlan_probe(void)
++{
++	int enabled = 1;
++	uint32_t magic, nent, i;
++	vm_offset_t smem;
++
++	PE_parse_boot_argn("sweetwlan", &enabled, sizeof(enabled));
++	if (!enabled) {
++		return;
++	}
++	printf("SWEET WLAN: probing SMEM at 0x%x size 0x%x (read-only)\n", SWEET_SMEM_PA, SWEET_SMEM_SIZE);
++	smem = ml_io_map(SWEET_SMEM_PA, SWEET_SMEM_SIZE);
++	if (smem == 0) {
++		printf("SWEET WLAN: SMEM map failed\n");
++		return;
++	}
++	printf("SWEET WLAN: header: SBL version %u initialized %u free_offset 0x%x available 0x%x\n",
++	    smem_rd(smem, SMEM_HDR_VERSION_OFF + SMEM_SBL_VERSION_INDEX * 4),
++	    smem_rd(smem, SMEM_HDR_INIT_OFF), smem_rd(smem, SMEM_HDR_INIT_OFF + 4),
++	    smem_rd(smem, SMEM_HDR_INIT_OFF + 8));
++
++	magic = smem_rd(smem, SWEET_SMEM_PTABLE_OFF);
++	if (magic != PTABLE_MAGIC) {
++		printf("SWEET WLAN: no $TOC at +0x%x (read 0x%08x); legacy or uninitialised SMEM\n",
++		    SWEET_SMEM_PTABLE_OFF, magic);
++		return;
++	}
++	nent = smem_rd(smem, SWEET_SMEM_PTABLE_OFF + 8);
++	printf("SWEET WLAN: $TOC version %u, %u partition(s)\n",
++	    smem_rd(smem, SWEET_SMEM_PTABLE_OFF + 4), nent);
++	if (nent > PTABLE_MAX_ENTRIES) {
++		printf("SWEET WLAN: implausible partition count, clamped to %u\n", PTABLE_MAX_ENTRIES);
++		nent = PTABLE_MAX_ENTRIES;
++	}
++	for (i = 0; i < nent; i++) {
++		uint32_t e = SWEET_SMEM_PTABLE_OFF + PTABLE_HDR_SIZE + i * PTABLE_ENTRY_SIZE;
++		uint32_t poff, psize, flags, hosts;
++
++		if (!smem_in_range(e, PTABLE_ENTRY_SIZE)) {
++			printf("SWEET WLAN: $TOC entry %u beyond SMEM window\n", i);
++			break;
++		}
++		poff = smem_rd(smem, e);
++		psize = smem_rd(smem, e + 4);
++		flags = smem_rd(smem, e + 8);
++		hosts = smem_rd(smem, e + 12);
++		printf("SWEET WLAN: entry %u offset 0x%x size 0x%x flags 0x%x hosts 0x%04x<->0x%04x cacheline %u\n",
++		    i, poff, psize, flags, hosts & 0xffff, hosts >> 16, smem_rd(smem, e + 16));
++		if (psize != 0) {
++			smem_dump_partition(smem, poff, psize);
++		}
++	}
++	printf("SWEET WLAN: SMEM probe done\n");
++}
++#endif /* ARM64_BOARD_CONFIG_SWEET */
