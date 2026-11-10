@@ -1,0 +1,26 @@
+--- a/bsd/dev/sweet_usb.c
++++ b/bsd/dev/sweet_usb.c
+@@ -5,8 +5,14 @@
+ 	socket_t so = NULL;
+ 	struct sockaddr_in to;
+ 	uint64_t pos = sweet_log_position();
++	int back_kib = 64;
+ 
+-	pos = pos > 65536 ? pos - 65536 : 0;
++	/* sweetusbback=KiB: how much of the past to replay (default 64; the ring is 4096). */
++	PE_parse_boot_argn("sweetusbback", &back_kib, sizeof(back_kib));
++	if (back_kib < 0) {
++		back_kib = 0;
++	}
++	pos = pos > (uint64_t)back_kib * 1024 ? pos - (uint64_t)back_kib * 1024 : 0;
+ 	bzero(&to, sizeof(to));
+ 	to.sin_len = sizeof(to);
+ 	to.sin_family = AF_INET;
+@@ -32,6 +38,7 @@
+ 			if (sock_send(so, &msg, 0, &sent) != 0) {
+ 				break;          /* no route/ARP yet: retry later */
+ 			}
++			ud_sleep_ms(1);         /* a long replay must not overrun the host's socket buffer */
+ 		}
+ 	}
+ }
