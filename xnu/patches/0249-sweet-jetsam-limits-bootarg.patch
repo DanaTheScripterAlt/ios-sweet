@@ -1,8 +1,7 @@
 diff --git a/bsd/kern/kern_memorystatus.c b/bsd/kern/kern_memorystatus.c
 --- a/bsd/kern/kern_memorystatus.c
 +++ b/bsd/kern/kern_memorystatus.c
-@@ -1203,4 +1203,15 @@ memorystatus_init(void)
- {
+@@ -1204,2 +1204,13 @@ memorystatus_init(void)
  	kern_return_t result;
  	int i;
 +	/*
@@ -16,4 +15,3 @@ diff --git a/bsd/kern/kern_memorystatus.c b/bsd/kern/kern_memorystatus.c
 +			printf("SWEET JETSAM: per-process memory limits off (sweetjetsamlimits=0)\n");
 +		}
 +	}
- #if CONFIG_FREEZE
