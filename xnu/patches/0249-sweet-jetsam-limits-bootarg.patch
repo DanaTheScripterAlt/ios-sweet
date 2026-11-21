@@ -1,12 +1,15 @@
 diff --git a/bsd/kern/kern_memorystatus.c b/bsd/kern/kern_memorystatus.c
+index 1750d3a..949fc17 100644
 --- a/bsd/kern/kern_memorystatus.c
 +++ b/bsd/kern/kern_memorystatus.c
-@@ -1204,2 +1204,13 @@ memorystatus_init(void)
+@@ -1312,6 +1312,19 @@ memorystatus_init(void)
  	kern_return_t result;
  	int i;
+ 
 +	/*
-+	 * Start with per-process high-water limits disabled only when explicitly
-+	 * requested. System-wide jetsam remains enabled.
++	 * Sweet 0249: boot-arg sweetjetsamlimits=0 starts with per-process memory
++	 * limits off, as the DEVELOPMENT sysctl kern.memorystatus_highwater_enabled=0
++	 * would (system-wide jetsam still runs).
 +	 */
 +	{
 +		int limits = 1;
@@ -15,3 +18,7 @@ diff --git a/bsd/kern/kern_memorystatus.c b/bsd/kern/kern_memorystatus.c
 +			printf("SWEET JETSAM: per-process memory limits off (sweetjetsamlimits=0)\n");
 +		}
 +	}
++
+ #if CONFIG_FREEZE
+ 	memorystatus_freeze_jetsam_band = JETSAM_PRIORITY_FREEZER;
+ 	memorystatus_frozen_processes_max = FREEZE_PROCESSES_MAX;
