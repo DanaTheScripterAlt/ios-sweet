@@ -1,7 +1,7 @@
 diff --git a/bsd/kern/kern_memorystatus.c b/bsd/kern/kern_memorystatus.c
 --- a/bsd/kern/kern_memorystatus.c
 +++ b/bsd/kern/kern_memorystatus.c
-@@ -1203,4 +1203,16 @@ memorystatus_init(void)
+@@ -1203,4 +1203,15 @@ memorystatus_init(void)
  {
  	kern_return_t result;
  	int i;
